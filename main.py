@@ -1,117 +1,128 @@
 from sqlalchemy import create_engine, Column, Integer, String, Date, ForeignKey, func
-from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from faker import Faker
 import random
 from datetime import datetime
-
-# Підключення до бази даних PostgreSQL
-engine = create_engine('postgresql://postgres:postgres@localhost:5432/mydatabase')
-
-# Створення сесії
-Session = sessionmaker(bind=engine)
-session = Session()
+import argparse
 
 # Оголошення базового класу моделей
 Base = declarative_base()
 
-# Оголошення моделей
 class Group(Base):
     __tablename__ = 'groups'
-
     id = Column(Integer, primary_key=True)
-    name = Column(String)
+    name = Column(String(50))
+    students = relationship('Student', backref='group')
 
 class Student(Base):
     __tablename__ = 'students'
-
     id = Column(Integer, primary_key=True)
-    name = Column(String)
+    name = Column(String(100))
     group_id = Column(Integer, ForeignKey('groups.id'))
-    group = relationship('Group', backref='students')
+    grades = relationship('Grade', backref='student')
 
 class Teacher(Base):
     __tablename__ = 'teachers'
-
     id = Column(Integer, primary_key=True)
-    name = Column(String)
+    name = Column(String(100))
+    subjects = relationship('Subject', backref='teacher')
 
 class Subject(Base):
     __tablename__ = 'subjects'
-
     id = Column(Integer, primary_key=True)
-    name = Column(String)
+    name = Column(String(50))
     teacher_id = Column(Integer, ForeignKey('teachers.id'))
-    teacher = relationship('Teacher', backref='subjects')
+    grades = relationship('Grade', backref='subject')
 
 class Grade(Base):
     __tablename__ = 'grades'
-
     id = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey('students.id'))
     subject_id = Column(Integer, ForeignKey('subjects.id'))
-    grade = Column(Integer)
+    value = Column(Integer)
     date = Column(Date)
 
-# Створення таблиць у базі даних
-Base.metadata.create_all(engine)
+def setup_database():
+    engine = create_engine('postgresql://postgres:postgres@localhost:5432/mydatabase')
+    Base.metadata.create_all(engine)
+    return engine
 
-# Заповнення бази даних даними
-fake = Faker()
+def fill_database(engine):
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    faker = Faker()
 
-# Заповнення таблиці груп
-groups = [Group(name=f'Group {i}') for i in range(1, 4)]
-session.add_all(groups)
-session.commit()
+    # Create groups
+    groups = [Group(name=f'Group {i}') for i in range(1, 4)]
+    session.add_all(groups)
 
-# Заповнення таблиці викладачів
-teachers = [Teacher(name=fake.name()) for _ in range(3)]
-session.add_all(teachers)
-session.commit()
+    # Create teachers
+    teachers = [Teacher(name=faker.name()) for _ in range(3)]
+    session.add_all(teachers)
 
-# Заповнення таблиці студентів та предметів
-for _ in range(30):  # Кількість студентів
-    student = Student(name=fake.name(), group_id=random.randint(1, 3))
-    session.add(student)
-    session.commit()
+    # Create students and subjects
+    for _ in range(30):
+        group = random.choice(groups)
+        student = Student(name=faker.name(), group=group)
+        session.add(student)
 
-    for _ in range(random.randint(5, 8)):  # Кількість предметів
-        subject = Subject(name=fake.word(), teacher_id=random.randint(1, 3))
-        session.add(subject)
-        session.commit()
+        for _ in range(random.randint(2, 5)):  # Each student takes 2-5 subjects
+            teacher = random.choice(teachers)
+            subject = Subject(name=faker.word(), teacher=teacher)
+            session.add(subject)
 
-        for student_id in range(1, 31):  # Кількість студентів
-            grade = Grade(student_id=student_id, subject_id=subject.id, grade=random.randint(1, 10), date=datetime.now())
+            # Assign grades to the subject
+            grade = Grade(student=student, subject=subject, value=random.randint(1, 10), date=faker.date_this_year())
             session.add(grade)
 
-session.commit()
+    session.commit()
+    session.close()
 
-# Виконання SQL-запитів
-# query_1.sql: Знайти 5 студентів із найбільшим середнім балом з усіх предметів.
-top_students = session.query(Student.name, func.avg(Grade.grade).label('average_grade')) \
-                     .join(Grade) \
-                     .group_by(Student.id) \
-                     .order_by(func.avg(Grade.grade).desc()) \
-                     .limit(5) \
-                     .all()
+def main():
+    engine = setup_database()
+    fill_database(engine)
 
-# query_2.sql: Знайти середній бал у групах з певного предмета.
-average_grade_by_group = session.query(Group.name, func.avg(Grade.grade).label('average_grade')) \
-                                .join(Student) \
-                                .join(Grade) \
-                                .join(Subject) \
-                                .filter(Subject.name == 'Your Subject') \
-                                .group_by(Group.id) \
-                                .all()
+    parser = argparse.ArgumentParser(description="Database Management CLI")
+    parser.add_argument('-a', '--action', required=True, choices=['create', 'list', 'update', 'remove'], help='CRUD action')
+    parser.add_argument('-m', '--model', required=True, choices=['Group', 'Student', 'Teacher', 'Subject', 'Grade'], help='Model to interact with')
+    parser.add_argument('--name', help='Name for creating or updating')
+    parser.add_argument('--id', type=int, help='ID for updating or removing')
+    args = parser.parse_args()
 
-# Вивід результатів
-print("Top 5 students with highest average grades:")
-for student in top_students:
-    print(student.name, student.average_grade)
+    Session = sessionmaker(bind=engine)
+    session = Session()
 
-print("\nAverage grades by group for a specific subject:")
-for group in average_grade_by_group:
-    print(group.name, group.average_grade)
+    if args.model and hasattr(eval(args.model), '__tablename__'):
+        model = eval(args.model)
+        if args.action == 'create' and args.name:
+            obj = model(name=args.name)
+            session.add(obj)
+            session.commit()
+            print(f"{args.model} '{args.name}' created.")
+        elif args.action == 'list':
+            items = session.query(model).all()
+            for item in items:
+                print(f"ID: {item.id}, Name: {item.name}")
+        elif args.action == 'update' and args.id and args.name:
+            item = session.query(model).filter_by(id=args.id).first()
+            if item:
+                item.name = args.name
+                session.commit()
+                print(f"{args.model} ID {args.id} updated to {args.name}.")
+            else:
+                print(f"{args.model} ID {args.id} not found.")
+        elif args.action == 'remove' and args.id:
+            item = session.query(model).filter_by(id=args.id).first()
+            if item:
+                session.delete(item)
+                session.commit()
+                print(f"{args.model} ID {args.id} removed.")
+            else:
+                print(f"{args.model} ID {args.id} not found.")
+        else:
+            print("Invalid command or arguments.")
 
-# Закриття сесії з базою даних
-session.close()
+    session.close()
+
+if __name__ == '__main__':
+    main()
